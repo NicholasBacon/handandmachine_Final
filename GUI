@@ -1,0 +1,395 @@
+import dearpygui.dearpygui as dpg
+from time import sleep
+import numpy as np
+from numpy import radians as rad
+
+
+
+
+class PlasmaTurtle:
+    def __init__(self):
+        self.moves = []
+        self.lines = []
+        self.blobs = []
+
+        self.gcode = []
+        self.plasma = False
+
+        self.position = np.array([0, 0, 0])
+        self.rotation = np.identity(4)
+        self.rot_unit = np.array([0, 1, 0, 0])
+        self.rate = 1.0
+
+    def goto(self, point, speed= 1500):
+    
+        point= np.array(point)
+        move = point - self.position
+        loc = 'X{:.2f} Y{:.2f} Z{:.2f}'.format(*move)
+        line = [self.position.tolist(), point.tolist(), (np.nan, np.nan, np.nan)]
+        if self.plasma:
+            self.gcode.append(f'G1 {loc} F{speed}')
+            self.lines.extend(line)
+        else:
+            self.gcode.append(f'G0 {loc} F{speed}')
+            self.moves.extend(line)
+
+        self.position = point
+
+    def start(self, rate=None):
+        self.plasma = True
+        if rate:
+            self.rate = rate
+
+    def stop(self):
+        self.plasma = False
+
+
+    def save(self, path):
+        with open(path, 'wt+') as file:
+            for line in self.gcode:
+
+                file.write(line+"\n")
+
+
+
+
+dpg.create_context()
+
+
+drawing = False
+last_position = None
+current_shape = "line"
+line_color = (255, 0, 0)
+line_thickness = 2
+ICLOCK = True
+
+image = None
+
+
+def is_clockwise(points):
+    n = len(points)
+    area = 0
+    for i in range(n):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]
+        area += (x2 - x1) * (y2 + y1)
+
+    return area < 0
+
+
+def mouse_release_handler(sender, app_data):
+    global drawing
+    drawing = False
+    last_position = None
+
+
+def set_tool(tool):
+    global current_shape
+    current_shape = tool
+
+
+def set_color(sender, app_data):
+    global line_color
+    line_color = app_data
+
+
+def set_thickness(sender, app_data):
+    global line_thickness
+    line_thickness = app_data
+
+
+
+dpg.create_context()
+
+with dpg.theme() as canvas_theme, dpg.theme_component():
+    dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 0, 0)
+    dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (255, 255, 255, 255))
+
+
+def draw(_, app_data):
+    x, y = dpg.get_mouse_pos()
+    while dpg.is_mouse_button_down(button=dpg.mvMouseButton_Left):
+        new_x, new_y = dpg.get_mouse_pos()
+
+
+        if new_x != x or new_y != y:
+            dpg.draw_line((x, y), (new_x, new_y), parent=app_data[1], color=[0.0, 0.0, 0.0, 255.0],
+                          thickness=line_thickness)
+            x, y = new_x, new_y
+            sleep(0.02)
+
+
+def fit_to_screen():
+    width, height = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
+    dpg.set_item_width("main_window", width)
+    dpg.set_item_height("main_window", height)
+
+
+def file_dialog_callback(sender, app_data):
+    file_path = app_data[0]
+    if file_path:
+        print(f"Selected file: {file_path}")
+    else:
+        print("No file selected.")
+
+
+def open_file_dialog():
+    dpg.open_file_dialog(callback=file_dialog_callback, extensions="*.svg")
+
+
+from svgpathtools import svg2paths
+
+
+def extract_coordinates(svg_file):
+    paths, attributes = svg2paths(svg_file)
+
+    coordinates = []
+
+    for path, attribute in zip(paths, attributes):
+        coordinate = []
+        for segment in path:
+            if segment.__class__.__name__ == 'Line':
+                coordinate.append((segment.start.real, segment.start.imag))
+                coordinate.append((segment.end.real, segment.end.imag))
+            elif segment.__class__.__name__ == 'CubicBezier':
+                coordinate.append((segment.start.real, segment.start.imag))
+                coordinate.append((segment.control1.real, segment.control1.imag))
+                coordinate.append((segment.control2.real, segment.control2.imag))
+                coordinate.append((segment.end.real, segment.end.imag))
+            elif segment.__class__.__name__ == 'QuadraticBezier':
+                coordinate.append((segment.start.real, segment.start.imag))
+                coordinate.append((segment.control.real, segment.control.imag))
+                coordinate.append((segment.end.real, segment.end.imag))
+        coordinates.append(coordinate)
+
+    return coordinates
+
+
+def AddImage(sender, app_data):
+
+
+    global image
+    image = app_data['file_path_name']
+    makeCutlist()
+import math
+
+
+def distance(p1, p2):
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+def calculate_centroid(shape):
+    x_coords = [point[0] for point in shape]
+    y_coords = [point[1] for point in shape]
+    return (sum(x_coords) / len(x_coords), sum(y_coords) / len(y_coords))
+
+
+def greedy_sort_shapes(shapes):
+    if not shapes:
+        return []
+
+    centroids = [calculate_centroid(shape) for shape in shapes]
+
+    sorted_shapes = [shapes.pop(0)]
+    sorted_centroids = [centroids.pop(0)]
+
+    while shapes:
+
+        last_centroid = sorted_centroids[-1]
+        closest_index = min(range(len(centroids)), key=lambda i: distance(last_centroid, centroids[i]))
+
+
+        sorted_shapes.append(shapes.pop(closest_index))
+        sorted_centroids.append(centroids.pop(closest_index))
+
+    return sorted_shapes
+
+
+from shapely.geometry import Polygon, Point
+
+
+def find_shapes_inside(shapes):
+
+    polygons = [Polygon(shape) for shape in shapes]
+    inside_indices = []
+
+
+    for i, shape in enumerate(polygons):
+        for j, other_shape in enumerate(polygons):
+            if i != j and other_shape.contains(shape):
+                inside_indices.append(i)
+                break
+    return inside_indices
+
+
+def filter_by_indices(elements, indices):
+    return [elements[i] for i in indices]
+
+def find_missing_indices(total_count, given_indices):
+    foo = set(range(0, 4))
+
+    full_indices = set(range(0,total_count))
+    given_indices_set = set()
+
+
+    for item in given_indices:
+        given_indices_set.add(item)
+
+
+
+    missing_indices = full_indices - given_indices_set
+
+    return list(missing_indices)
+scale_image = 15
+scale_cutter = 15
+
+
+def makeCutlist():
+    global image
+    global canvas
+    shapes = extract_coordinates(image)
+    inside = find_shapes_inside(shapes)
+    outside = find_missing_indices(len(shapes), inside)
+    cutorder  = [ greedy_sort_shapes(filter_by_indices(shapes, inside)) ,greedy_sort_shapes(filter_by_indices(shapes, outside))]
+    global scale_image
+    global scale_cutter
+
+
+
+    last_x_coords, last_y_coords = None, None
+    first = False
+    turtle = PlasmaTurtle()
+
+    delta = 15
+    for coord in cutorder[0]:
+
+        if not len(coord) == 0:
+            l=coord
+
+
+            if(is_clockwise(coord)):
+                l= coord[::-1]
+
+
+            for x, y in l:
+                if first:
+                    dpg.draw_line((delta+last_x_coords / scale_image, delta+last_y_coords / scale_image), (delta+x / scale_image, delta+y / scale_image),
+                                  parent=canvas + 1, color=[31.874509811401367, 255.0, 0.0, 255.0],
+                                  thickness=line_thickness)
+                    first =False
+                    last_x_coords, last_y_coords = None, None
+
+                if last_x_coords == None:
+                    last_x_coords, last_y_coords = x, y
+                    turtle.goto([delta+last_x_coords / scale_cutter, delta+last_y_coords / scale_cutter,0])
+                    turtle.start()
+                else:
+                    x_coords, y_coords = x, y
+
+                    dpg.draw_line((delta+x_coords / scale_image, delta+y_coords / scale_image), (delta+last_x_coords / scale_image, delta+last_y_coords / scale_image),
+                                  parent=canvas + 1, color=[255.0, 0.0, 0.0, 255.0],
+                                  thickness=line_thickness)
+                    turtle.goto([delta+x_coords / scale_cutter, delta+y_coords / scale_cutter,0])
+
+
+                    last_x_coords, last_y_coords = x, y
+
+            turtle.stop()
+
+        first =True
+
+    for coord in cutorder[1]:
+
+        if not len(coord) == 0:
+            l = coord
+
+
+            if (is_clockwise(coord)):
+                l = coord[::-1]
+            for x, y in l:
+                if first:
+                    dpg.draw_line((delta+last_x_coords / scale_image, delta+last_y_coords / scale_image), (delta+x / scale_image, delta+y / scale_image),
+                                  parent=canvas + 1, color=[31.874509811401367, 255.0, 0.0, 255.0],
+                                  thickness=line_thickness)
+                    first =False
+                    last_x_coords, last_y_coords = None, None
+
+                if last_x_coords == None:
+
+                    last_x_coords, last_y_coords = x, y
+                    turtle.goto([delta + last_x_coords / scale_cutter, delta + last_y_coords / scale_cutter, 0])
+                    turtle.start()
+                else:
+                    x_coords, y_coords = x, y
+
+                    dpg.draw_line((delta+x_coords / scale_image, delta+y_coords / scale_image), (delta+last_x_coords / scale_image, delta+last_y_coords / scale_image),
+                                  parent=canvas + 1, color=[0.0, 0.0, 0.0, 255.0],
+                                  thickness=line_thickness)
+                    last_x_coords, last_y_coords = x, y
+                    turtle.goto([delta + x_coords / scale_cutter, delta + y_coords / scale_cutter, 0])
+        turtle.stop()
+        first =True
+        turtle.save(image+".gcode")
+
+
+def scale_image_callback(sender, app_data):
+    global  scale_image
+
+    scale_image=app_data
+
+def scale_cutter_callback(sender, app_data):
+    global scale_cutter
+    scale_cutter=app_data
+
+
+def re_draw_callback(sender, app_data):
+    if not image == None:
+        dpg.delete_item(drawlist, children_only=True)
+        makeCutlist()
+
+
+
+with dpg.file_dialog(directory_selector=False, show=False, callback=AddImage, id="file_dialog_id", width=700,
+                     height=400):
+    dpg.add_file_extension(".svg", color=(0, 255, 0, 255), custom_text="Vector Image")
+
+with dpg.window(label="SVG TO GCODE", tag="main_window", no_move=True, no_resize=True, no_close=True,
+                no_title_bar=True):
+    with dpg.group(horizontal=True):
+
+        with dpg.child_window(width=200, autosize_y=True):
+            dpg.add_button(label="Redraw",callback=re_draw_callback)
+            dpg.add_button(label="File Selector", callback=lambda: dpg.show_item("file_dialog_id"))
+            dpg.add_button(label="Clear Canvas", callback=lambda: dpg.delete_item(drawlist, children_only=True))
+            dpg.add_input_int(label="Cutter",
+                              default_value=1,
+                              step=1,
+                              callback=scale_cutter_callback)
+            dpg.add_input_int(label="Image",
+                              default_value=1500,
+                              step=1,
+                              callback=scale_image_callback)
+
+        with dpg.child_window(autosize_x=True, autosize_y=True):
+
+            global canvas
+
+            with dpg.child_window(width=1000, height=1000) as canvas:
+                dpg.bind_item_theme(canvas, canvas_theme)
+                drawlist = dpg.add_drawlist(width=1500, height=1500)
+                with dpg.item_handler_registry() as registry:
+                    dpg.add_item_clicked_handler(button=dpg.mvMouseButton_Left, callback=draw)
+                dpg.bind_item_handler_registry(drawlist, registry)
+
+
+
+dpg.create_viewport(title='SVG TO GCODE', width=800, height=600)
+dpg.setup_dearpygui()
+dpg.show_viewport()
+
+fit_to_screen()
+
+dpg.set_viewport_resize_callback(lambda sender, app_data: fit_to_screen())
+
+dpg.start_dearpygui()
+
+dpg.destroy_context()
